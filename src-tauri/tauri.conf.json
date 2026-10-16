@@ -1,0 +1,31 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SSHDesk",
+  "version": "1.0.0",
+  "identifier": "com.codes.sshdesk.tauri",
+  "build": {
+    "beforeDevCommand": "npm run dev:serve",
+    "devUrl": "http://localhost:5178",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "连枢",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 880,
+        "minHeight": 560
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.png", "icons/icon.ico"]
+  }
+}

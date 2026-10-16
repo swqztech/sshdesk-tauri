@@ -1,0 +1,39 @@
+[package]
+name = "sshdesk-tauri"
+version = "1.0.0"
+description = "连枢 SSH 主机台"
+authors = ["codes"]
+edition = "2021"
+
+[lib]
+name = "sshdesk_tauri_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+parking_lot = "0.12"
+uuid = { version = "1", features = ["v4"] }
+directories = "5"
+base64 = "0.22"
+anyhow = "1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+russh = "0.44"
+russh-keys = "0.44"
+russh-sftp = "2.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+flate2 = "1"
+hmac = "0.12"
+sha1 = "0.10"
+hex = "0.4"
+zip = "9.0"
+regex = "1"
+chrono = "0.4"
+urlencoding = "2"

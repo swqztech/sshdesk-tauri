@@ -1,0 +1,33 @@
+{
+  "name": "sshdesk-tauri",
+  "version": "1.0.0",
+  "description": "连枢 SSH 主机台（Tauri + Vite + React）",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "dev:serve": "vite",
+    "build": "tsc -b && vite build",
+    "build:client": "npm run build && npm run tauri build",
+    "tauri": "tauri",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.2.0",
+    "@tauri-apps/plugin-dialog": "^2.2.0",
+    "@tauri-apps/plugin-opener": "^2.2.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/xterm": "^5.5.0",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.2.0",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.6"
+  }
+}
