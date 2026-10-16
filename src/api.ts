@@ -223,9 +223,11 @@ export const api = {
     return true
   },
 
-  onData: (cb: (payload: { sessionId: string; data: string }) => void) => {
+  onData: (
+    cb: (payload: { sessionId: string; data?: string; dataB64?: string }) => void
+  ) => {
     const listener = (payload: unknown) =>
-      cb(payload as { sessionId: string; data: string })
+      cb(payload as { sessionId: string; data?: string; dataB64?: string })
     subscribeEvent('ssh:data', listener)
     return () => unsubscribeEvent('ssh:data', listener)
   },

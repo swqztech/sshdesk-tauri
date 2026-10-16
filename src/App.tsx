@@ -1159,33 +1159,20 @@ export default function App() {
 
                   >
 
-                    {hostTab.shells.map((shell) => (
-
-                      <TerminalPane
-
-                        key={shell.shellId}
-
-                        sessionId={shell.shellId}
-
-                        active={
-
-                          panel === 'term' &&
-
-                          isActiveHost &&
-
-                          hostTab.activeShellId === shell.shellId
-
-                        }
-
-                        hostVisible={panel === 'term' && isActiveHost}
-
-                        pendingCd={pendingTermCd[shell.shellId]}
-
-                        onPendingCdConsumed={() => clearPendingTermCd(shell.shellId)}
-
-                      />
-
-                    ))}
+                    {panel === 'term' &&
+                      isActiveHost &&
+                      hostTab.shells
+                        .filter((shell) => shell.shellId === hostTab.activeShellId)
+                        .map((shell) => (
+                          <TerminalPane
+                            key={shell.shellId}
+                            sessionId={shell.shellId}
+                            active
+                            hostVisible
+                            pendingCd={pendingTermCd[shell.shellId]}
+                            onPendingCdConsumed={() => clearPendingTermCd(shell.shellId)}
+                          />
+                        ))}
 
                   </div>
 

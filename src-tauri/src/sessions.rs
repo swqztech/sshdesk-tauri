@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine};
 use crate::events::emit;
 use crate::hosts::{get_host_secret, AuthType};
 use crate::persist_state::SessionInfo;
@@ -5,7 +6,7 @@ use crate::ssh_remote::sh_quote;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use russh::client::{self, Config, Handler};
-use russh::{Channel, ChannelMsg, Disconnect};
+use russh::{Channel, ChannelMsg, Disconnect, Pty};
 use russh_keys::key;
 use std::collections::HashMap;
 use std::path::Path;
@@ -168,7 +169,11 @@ impl SessionManager {
                                 emit(
                                     &app,
                                     "ssh:data",
-                                    serde_json::json!({ "sessionId": shell_id, "data": text }),
+                                    serde_json::json!({
+                                        "sessionId": shell_id,
+                                        "data": text,
+                                        "dataB64": STANDARD.encode(&data)
+                                    }),
                                 );
                             }
                             Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Close) | None => {
@@ -214,14 +219,31 @@ impl SessionManager {
             .map_err(|e| format!("无法打开 shell: {}", e))?;
         let cols = *shell.cols.lock();
         let rows = *shell.rows.lock();
+        let pty_modes = [(Pty::IUTF8, 1_u32)];
         channel
-            .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
+            .request_pty(false, "xterm-256color", cols, rows, 0, 0, &pty_modes)
             .await
             .map_err(|e| e.to_string())?;
+        // 与 sshdesk-app src/main/sessions.ts shell env 一致（勿设 PM2_NO_COLOR）
+        for (name, value) in [
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
+            ("FORCE_COLOR", "1"),
+            ("CLICOLOR", "1"),
+            ("CLICOLOR_FORCE", "1"),
+        ] {
+            let _ = channel.set_env(false, name, value).await;
+        }
         channel.request_shell(true).await.map_err(|e| e.to_string())?;
-        let (io_tx, io_rx) = unbounded_channel();
-        *shell.io_tx.lock().await = Some(io_tx);
-        Self::spawn_shell_io_loop(self.app.clone(), shell.id.clone(), channel, io_rx);
+        {
+            let mut guard = shell.io_tx.lock().await;
+            if guard.is_some() {
+                return Err("终端 IO 已在运行".into());
+            }
+            let (io_tx, io_rx) = unbounded_channel();
+            *guard = Some(io_tx);
+            Self::spawn_shell_io_loop(self.app.clone(), shell.id.clone(), channel, io_rx);
+        }
         Ok(())
     }
 

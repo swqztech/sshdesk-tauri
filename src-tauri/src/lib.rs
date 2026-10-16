@@ -20,6 +20,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+            }
             let handle = app.handle().clone();
             app.manage(SessionManager::new(handle));
             Ok(())

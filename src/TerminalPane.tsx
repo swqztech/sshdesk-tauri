@@ -3,6 +3,8 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
+import { registerTerminalWriter } from './terminalFeed'
+import { attachXtermRenderer } from './terminalRenderer'
 
 type Props = {
   sessionId: string
@@ -149,19 +151,29 @@ function closeTermContextMenu() {
   termCtxMenu = null
 }
 
+const resizeSent = new Map<string, { cols: number; rows: number }>()
+
 function fitTerminal(
   fit: FitAddon | null,
   term: Terminal | null,
-  sessionId: string
+  sessionId: string,
+  allowRemoteResize: boolean
 ) {
   if (!fit || !term) return
   try {
     fit.fit()
-    void window.api.resize(sessionId, term.cols, term.rows)
+    if (!allowRemoteResize) return
+    const cols = term.cols
+    const rows = term.rows
+    const prev = resizeSent.get(sessionId)
+    if (prev && prev.cols === cols && prev.rows === rows) return
+    resizeSent.set(sessionId, { cols, rows })
+    void window.api.resize(sessionId, cols, rows)
   } catch {
     // ignore
   }
 }
+
 
 export default function TerminalPane({
   sessionId,
@@ -173,6 +185,8 @@ export default function TerminalPane({
   const hostRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
+  const activeRef = useRef(active)
+  activeRef.current = active && hostVisible
 
   useEffect(() => {
     if (!hostRef.current) return
@@ -183,12 +197,16 @@ export default function TerminalPane({
       fontSize: 14,
       lineHeight: 1.25,
       convertEol: true,
-      // 完整 16 色 + 默认支持 256 色 / truecolor ANSI
+      scrollback: 5000,
+      minimumContrastRatio: 1,
+      drawBoldTextInBrightColors: true,
       theme: {
         background: '#0c1218',
         foreground: '#d7e2ea',
         cursor: '#f2c14e',
-        selectionBackground: rgba('#f2c14e', 0.28),
+        selectionBackground: '#f2c14e',
+        selectionInactiveBackground: '#6b5a2e',
+        selectionForeground: '#0a0f14',
         black: '#0c1218',
         red: '#ff6b4a',
         green: '#3ddc97',
@@ -212,16 +230,16 @@ export default function TerminalPane({
     term.loadAddon(fit)
     term.loadAddon(new WebLinksAddon())
     term.open(hostRef.current)
+    const disposeRenderer = attachXtermRenderer(term)
     fit.fit()
-    void window.api.resize(sessionId, term.cols, term.rows)
+    fitTerminal(fit, term, sessionId, true)
 
     const onData = term.onData((data) => {
       void window.api.write(sessionId, data)
     })
 
-    const offData = window.api.onData((payload) => {
-      if (payload.sessionId !== sessionId) return
-      term.write(payload.data)
+    const offFeed = registerTerminalWriter(sessionId, (chunk) => {
+      term.write(chunk)
     })
 
     const offClosed = window.api.onClosed((payload) => {
@@ -239,24 +257,36 @@ export default function TerminalPane({
 
     const unbindClipboard = bindClipboard(term, hostRef.current)
 
+    let fitTimer: ReturnType<typeof setTimeout> | undefined
+    const scheduleFit = () => {
+      clearTimeout(fitTimer)
+      fitTimer = setTimeout(() => {
+        if (!activeRef.current) return
+        fitTerminal(fitRef.current, termRef.current, sessionId, true)
+      }, 120)
+    }
+
     const ro = new ResizeObserver(() => {
-      fitTerminal(fit, term, sessionId)
+      scheduleFit()
     })
     ro.observe(hostRef.current)
 
     const onWindowResize = () => {
-      fitTerminal(fit, term, sessionId)
+      scheduleFit()
     }
     window.addEventListener('resize', onWindowResize)
 
     return () => {
       onData.dispose()
-      offData()
+      offFeed()
       offClosed()
       offError()
       unbindClipboard()
       ro.disconnect()
       window.removeEventListener('resize', onWindowResize)
+      clearTimeout(fitTimer)
+      resizeSent.delete(sessionId)
+      disposeRenderer()
       term.dispose()
       termRef.current = null
       fitRef.current = null
@@ -280,7 +310,7 @@ export default function TerminalPane({
     if (!active || !hostVisible) return
     const refit = () => {
       const term = termRef.current
-      fitTerminal(fitRef.current, term, sessionId)
+      fitTerminal(fitRef.current, term, sessionId, true)
       try {
         term?.refresh(0, Math.max(0, term.rows - 1))
       } catch {
@@ -308,11 +338,3 @@ export default function TerminalPane({
   )
 }
 
-function rgba(hex: string, alpha: number) {
-  const h = hex.replace('#', '')
-  const n = Number.parseInt(h, 16)
-  const r = (n >> 16) & 255
-  const g = (n >> 8) & 255
-  const b = n & 255
-  return `rgba(${r},${g},${b},${alpha})`
-}
