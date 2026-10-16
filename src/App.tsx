@@ -1296,7 +1296,7 @@ export default function App() {
 
       {editor && (
 
-        <div className="modal-backdrop" role="presentation" onClick={() => setEditor(null)}>
+        <div className="modal-backdrop" role="presentation">
 
           <form
 
