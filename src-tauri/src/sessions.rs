@@ -12,7 +12,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex as AsyncMutex;
+
+enum ShellIoCmd {
+    Data(Vec<u8>),
+    Resize { cols: u32, rows: u32 },
+    Shutdown,
+}
 
 #[derive(Clone)]
 pub(crate) struct SshHandler;
@@ -32,7 +39,8 @@ impl Handler for SshHandler {
 struct Shell {
     id: String,
     connection_id: String,
-    channel: Arc<AsyncMutex<Option<Channel<client::Msg>>>>,
+    /// 写入 PTY 的队列；读循环在独立任务中持有 Channel，避免锁内 await 阻塞键盘输入
+    io_tx: AsyncMutex<Option<UnboundedSender<ShellIoCmd>>>,
     cols: Mutex<u32>,
     rows: Mutex<u32>,
 }
@@ -144,33 +152,48 @@ impl SessionManager {
         Ok((Arc::new(session), title))
     }
 
-    fn spawn_shell_reader(app: AppHandle, shell: Arc<Shell>) {
+    fn spawn_shell_io_loop(
+        app: AppHandle,
+        shell_id: String,
+        mut channel: Channel<client::Msg>,
+        mut cmd_rx: UnboundedReceiver<ShellIoCmd>,
+    ) {
         tokio::spawn(async move {
-            let shell_id = shell.id.clone();
             loop {
-                let msg = {
-                    let mut guard = shell.channel.lock().await;
-                    let ch = guard.as_mut();
-                    if ch.is_none() {
-                        break;
+                tokio::select! {
+                    msg = channel.wait() => {
+                        match msg {
+                            Some(ChannelMsg::Data { data }) => {
+                                let text = String::from_utf8_lossy(&data).to_string();
+                                emit(
+                                    &app,
+                                    "ssh:data",
+                                    serde_json::json!({ "sessionId": shell_id, "data": text }),
+                                );
+                            }
+                            Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Close) | None => {
+                                break;
+                            }
+                            _ => {}
+                        }
                     }
-                    ch.unwrap().wait().await
-                };
-                match msg {
-                    Some(ChannelMsg::Data { data }) => {
-                        let text = String::from_utf8_lossy(&data).to_string();
-                        emit(
-                            &app,
-                            "ssh:data",
-                            serde_json::json!({ "sessionId": shell_id, "data": text }),
-                        );
+                    cmd = cmd_rx.recv() => {
+                        match cmd {
+                            Some(ShellIoCmd::Data(bytes)) => {
+                                if channel.data(bytes.as_ref()).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Some(ShellIoCmd::Resize { cols, rows }) => {
+                                let _ = channel.window_change(cols, rows, 0, 0).await;
+                            }
+                            Some(ShellIoCmd::Shutdown) | None => break,
+                        }
                     }
-                    Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Close) | None => {
-                        break;
-                    }
-                    _ => {}
                 }
             }
+            let _ = channel.eof().await;
+            let _ = channel.close().await;
             emit(
                 &app,
                 "ssh:closed",
@@ -196,8 +219,9 @@ impl SessionManager {
             .await
             .map_err(|e| e.to_string())?;
         channel.request_shell(true).await.map_err(|e| e.to_string())?;
-        *shell.channel.lock().await = Some(channel);
-        Self::spawn_shell_reader(self.app.clone(), shell.clone());
+        let (io_tx, io_rx) = unbounded_channel();
+        *shell.io_tx.lock().await = Some(io_tx);
+        Self::spawn_shell_io_loop(self.app.clone(), shell.id.clone(), channel, io_rx);
         Ok(())
     }
 
@@ -208,16 +232,15 @@ impl SessionManager {
         }
         tokio::spawn(async move {
             for _ in 0..50 {
-                if shell.channel.lock().await.is_some() {
+                if shell.io_tx.lock().await.is_some() {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             tokio::time::sleep(Duration::from_millis(400)).await;
             let data = format!("{}\n", cmd);
-            let mut guard = shell.channel.lock().await;
-            if let Some(ref mut ch) = *guard {
-                let _ = ch.data(data.as_bytes()).await;
+            if let Some(tx) = shell.io_tx.lock().await.as_ref() {
+                let _ = tx.send(ShellIoCmd::Data(data.into_bytes()));
             }
         });
     }
@@ -244,7 +267,7 @@ impl SessionManager {
         let shell = Arc::new(Shell {
             id: shell_id.clone(),
             connection_id: connection_id.clone(),
-            channel: Arc::new(AsyncMutex::new(None)),
+            io_tx: AsyncMutex::new(None),
             cols: Mutex::new(120),
             rows: Mutex::new(36),
         });
@@ -306,7 +329,7 @@ impl SessionManager {
         let shell = Arc::new(Shell {
             id: shell_id.clone(),
             connection_id: connection.id.clone(),
-            channel: Arc::new(AsyncMutex::new(None)),
+            io_tx: AsyncMutex::new(None),
             cols: Mutex::new(120),
             rows: Mutex::new(36),
         });
@@ -326,11 +349,12 @@ impl SessionManager {
 
     pub async fn write_shell(&self, shell_id: &str, data: &str) -> Result<bool, String> {
         let shell = self.require_shell(shell_id)?;
-        let mut guard = shell.channel.lock().await;
-        let ch = guard
-            .as_mut()
+        let guard = shell.io_tx.lock().await;
+        let tx = guard
+            .as_ref()
             .ok_or_else(|| "终端通道未就绪".to_string())?;
-        ch.data(data.as_bytes()).await.map_err(|e| e.to_string())?;
+        tx.send(ShellIoCmd::Data(data.as_bytes().to_vec()))
+            .map_err(|_| "终端已关闭".to_string())?;
         Ok(true)
     }
 
@@ -340,13 +364,12 @@ impl SessionManager {
         let rows = rows.max(5);
         *shell.cols.lock() = cols;
         *shell.rows.lock() = rows;
-        let mut guard = shell.channel.lock().await;
-        let ch = guard
-            .as_mut()
+        let guard = shell.io_tx.lock().await;
+        let tx = guard
+            .as_ref()
             .ok_or_else(|| "终端通道未就绪".to_string())?;
-        ch.window_change(cols, rows, 0, 0)
-            .await
-            .map_err(|e| e.to_string())?;
+        tx.send(ShellIoCmd::Resize { cols, rows })
+            .map_err(|_| "终端已关闭".to_string())?;
         Ok(true)
     }
 
@@ -364,14 +387,11 @@ impl SessionManager {
         let shell = self.shells.lock().remove(shell_id);
         if let Some(shell) = shell {
             if end_stream {
-                let ch = shell.channel.clone();
+                let s = Arc::clone(&shell);
                 tokio::spawn(async move {
-                    let mut guard = ch.lock().await;
-                    if let Some(ref mut c) = *guard {
-                        let _ = c.eof().await;
-                        let _ = c.close().await;
+                    if let Some(tx) = s.io_tx.lock().await.take() {
+                        let _ = tx.send(ShellIoCmd::Shutdown);
                     }
-                    *guard = None;
                 });
             }
             if let Some(conn) = self.connections.lock().get(&shell.connection_id) {

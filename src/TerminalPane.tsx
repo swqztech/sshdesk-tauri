@@ -297,7 +297,15 @@ export default function TerminalPane({
     }
   }, [active, hostVisible, sessionId])
 
-  return <div className={`term-host ${active ? 'is-active' : ''}`} ref={hostRef} />
+  return (
+    <div
+      className={`term-host ${active ? 'is-active' : ''}`}
+      ref={hostRef}
+      onMouseDown={() => {
+        if (active) termRef.current?.focus()
+      }}
+    />
+  )
 }
 
 function rgba(hex: string, alpha: number) {

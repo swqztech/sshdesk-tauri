@@ -31,7 +31,9 @@ export async function rpc<T>(method: string, ...args: unknown[]): Promise<T> {
 }
 
 export function subscribeEvent(channel: string, handler: EventHandler): () => void {
-  void ensureEventBridge()
+  void ensureEventBridge().then(() => {
+    // 桥接就绪后无操作；仅保证尽早建立 Tauri 事件监听
+  })
   let set = channelHandlers.get(channel)
   if (!set) {
     set = new Set()
