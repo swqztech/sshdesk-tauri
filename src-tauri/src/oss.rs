@@ -106,27 +106,42 @@ pub async fn list_by_prefix(
         .map_err(|e| e.to_string())?;
     let prefix = normalize_prefix(&cfg.prefix);
     let mut items = Vec::new();
-    let mut marker: Option<String> = None;
+    // ListObjects：prefix / marker / max-keys 不参与 V1 签名，签进 CanonicalizedResource 会被拒，界面就像没有对象。
+    let mut marker = String::new();
     loop {
-        let mut query = format!("list-type=2&prefix={}", urlencoding::encode(&prefix));
-        if let Some(m) = &marker {
-            query.push_str(&format!("&continuation-token={}", urlencoding::encode(m)));
+        let mut query = format!("max-keys=1000&prefix={}", urlencoding::encode(&prefix));
+        if !marker.is_empty() {
+            query.push_str("&marker=");
+            query.push_str(&urlencoding::encode(&marker));
         }
-        let resource = format!("?{}", query);
-        let date = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
-        let auth = sign(cfg, "GET", &resource, &date, "");
-        let url = format!("{}{}", base_url(cfg).trim_end_matches('/'), resource);
-        let text = client
+        let date = chrono::Utc::now()
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        let auth = sign(cfg, "GET", "", &date, "");
+        let url = format!("{}?{}", base_url(cfg).trim_end_matches('/'), query);
+        let resp = client
             .get(&url)
             .header("Date", date)
             .header("Authorization", auth)
             .send()
             .await
-            .map_err(|e| e.to_string())?
-            .text()
-            .await
-            .map_err(|e| e.to_string())?;
-        // 极简 XML 解析
+            .map_err(|e| format!("OSS 列举失败: {}", e))?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| e.to_string())?;
+        if !status.is_success() {
+            let code = extract_tag(&text, "Code");
+            let message = extract_tag(&text, "Message");
+            let detail = if code.is_empty() && message.is_empty() {
+                status.to_string()
+            } else {
+                format!("{} {}", code, message).trim().to_string()
+            };
+            return Err(format!(
+                "OSS 列举失败（{}）：{}。请核对 Bucket 与前缀，Mongo 备份前缀默认是 backups/mongodb",
+                detail, prefix
+            ));
+        }
+        let mut page_last_key = String::new();
         for block in text.split("<Contents>").skip(1) {
             let key = extract_tag(block, "Key");
             let size = extract_tag(block, "Size").parse().unwrap_or(0);
@@ -134,6 +149,7 @@ pub async fn list_by_prefix(
             if key.is_empty() {
                 continue;
             }
+            page_last_key = key.clone();
             let name = key.split('/').last().unwrap_or(&key).to_string();
             if !name_ok(&name) {
                 continue;
@@ -149,11 +165,11 @@ pub async fn list_by_prefix(
         if !truncated {
             break;
         }
-        let next = extract_tag(&text, "NextContinuationToken");
-        if next.is_empty() {
+        let next = extract_tag(&text, "NextMarker");
+        marker = if next.is_empty() { page_last_key } else { next };
+        if marker.is_empty() {
             break;
         }
-        marker = Some(next);
     }
     items.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
     Ok(items)
