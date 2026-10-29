@@ -1,4 +1,4 @@
-# 推送到 main 后编译 Windows 版，并更新 Releases 里的 latest，方便在其他电脑下载。
+# 推送到 main 后编译 Windows / Linux / macOS，并更新 Releases 里的 latest。
 name: 发布连枢
 
 on:
@@ -10,8 +10,30 @@ permissions:
   contents: write
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  build:
+    name: 编译 ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows x64
+            artifact: windows-x64
+            bundles: nsis
+          - os: ubuntu-22.04
+            label: Linux x64
+            artifact: linux-x64
+            bundles: deb,appimage
+          - os: macos-latest
+            label: macOS Apple Silicon
+            artifact: macos-aarch64
+            bundles: dmg
+          - os: macos-15-intel
+            label: macOS Intel
+            artifact: macos-x64
+            bundles: dmg
+
     steps:
       - uses: actions/checkout@v4
 
@@ -22,13 +44,33 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装 Linux 依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libfuse2 \
+            file \
+            build-essential \
+            libssl-dev
+
       - name: 安装前端依赖
         run: npm ci
 
       - name: 编译
-        run: npm run tauri build
+        run: npm run tauri build -- --bundles ${{ matrix.bundles }}
 
-      - name: 收集可下载文件
+      - name: 收集 Windows 安装包
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -46,26 +88,71 @@ jobs:
           $setup = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           if (-not $setup) { throw "未找到安装包" }
           Copy-Item $setup.FullName dist-release/SSHDesk-x64-setup.exe
+          Remove-Item -Recurse -Force dist-release/stage
+
+      - name: 收集 Linux 安装包
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          deb=$(ls src-tauri/target/release/bundle/deb/*.deb | head -1)
+          appimage=$(ls src-tauri/target/release/bundle/appimage/*.AppImage | head -1)
+          cp "$deb" dist-release/SSHDesk-linux-x64.deb
+          cp "$appimage" dist-release/SSHDesk-linux-x64.AppImage
+
+      - name: 收集 macOS 安装包
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          case "$(uname -m)" in
+            arm64) suffix=aarch64 ;;
+            x86_64) suffix=x64 ;;
+            *) suffix=$(uname -m) ;;
+          esac
+          dmg=$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)
+          cp "$dmg" "dist-release/SSHDesk-macos-${suffix}.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sshdesk-${{ matrix.artifact }}
+          path: dist-release/*
+          if-no-files-found: error
+
+  publish:
+    name: 发布到 GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-release
+          merge-multiple: true
+          pattern: sshdesk-*
 
       - name: 更新 GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: pwsh
         run: |
-          $PSNativeCommandUseErrorActionPreference = $false
-          gh release delete latest --repo ${{ github.repository }} --yes --cleanup-tag
-          gh release create latest `
-            dist-release/SSHDesk-x64-portable.zip `
-            dist-release/SSHDesk-x64-setup.exe `
-            --repo ${{ github.repository }} `
-            --target ${{ github.sha }} `
-            --title "连枢最新版" `
-            --notes @"
+          set -euo pipefail
+          ls -lh dist-release
+          gh release delete latest --repo ${{ github.repository }} --yes --cleanup-tag || true
+          gh release create latest dist-release/* \
+            --repo ${{ github.repository }} \
+            --target ${{ github.sha }} \
+            --title "连枢最新版" \
+            --notes "$(cat <<EOF
           由 main 自动发布，可在其他电脑直接下载。
 
-          - SSHDesk-x64-portable.zip：绿色版，解压后运行 sshdesk-tauri.exe
-          - SSHDesk-x64-setup.exe：安装包
+          - SSHDesk-x64-portable.zip：Windows 绿色版，解压后运行 sshdesk-tauri.exe
+          - SSHDesk-x64-setup.exe：Windows 安装包
+          - SSHDesk-linux-x64.deb：Linux x64 安装包（Debian / Ubuntu）
+          - SSHDesk-linux-x64.AppImage：Linux x64，加上可执行权限后直接运行
+          - SSHDesk-macos-aarch64.dmg：Mac Apple Silicon
+          - SSHDesk-macos-x64.dmg：Mac Intel
+
+          macOS 安装包未签名。若系统拦截，请在「系统设置 → 隐私与安全性」中允许打开，或右键打开。
 
           对应提交：${{ github.sha }}
-          "@
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          EOF
+          )"
