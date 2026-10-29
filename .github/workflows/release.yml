@@ -1,0 +1,71 @@
+# 推送到 main 后编译 Windows 版，并更新 Releases 里的 latest，方便在其他电脑下载。
+name: 发布连枢
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 编译
+        run: npm run tauri build
+
+      - name: 收集可下载文件
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path dist-release/stage | Out-Null
+          $exe = "src-tauri/target/release/sshdesk-tauri.exe"
+          if (-not (Test-Path $exe)) { throw "未找到 $exe" }
+          Copy-Item $exe dist-release/stage/sshdesk-tauri.exe
+          @"
+          【连枢】Windows x64 绿色版
+
+          解压后双击 sshdesk-tauri.exe，无需安装。
+          需要 Microsoft Edge WebView2（Windows 11 一般已自带）。
+          "@ | Set-Content -Encoding utf8 dist-release/stage/使用说明.txt
+          Compress-Archive -Path dist-release/stage/* -DestinationPath dist-release/SSHDesk-x64-portable.zip -Force
+          $setup = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          if (-not $setup) { throw "未找到安装包" }
+          Copy-Item $setup.FullName dist-release/SSHDesk-x64-setup.exe
+
+      - name: 更新 GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          gh release delete latest --repo ${{ github.repository }} --yes --cleanup-tag
+          gh release create latest `
+            dist-release/SSHDesk-x64-portable.zip `
+            dist-release/SSHDesk-x64-setup.exe `
+            --repo ${{ github.repository }} `
+            --target ${{ github.sha }} `
+            --title "连枢最新版" `
+            --notes @"
+          由 main 自动发布，可在其他电脑直接下载。
+
+          - SSHDesk-x64-portable.zip：绿色版，解压后运行 sshdesk-tauri.exe
+          - SSHDesk-x64-setup.exe：安装包
+
+          对应提交：${{ github.sha }}
+          "@
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
