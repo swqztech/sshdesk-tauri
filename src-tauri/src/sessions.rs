@@ -19,7 +19,8 @@ use tokio::sync::Mutex as AsyncMutex;
 enum ShellIoCmd {
     Data(Vec<u8>),
     Resize { cols: u32, rows: u32 },
-    Shutdown,
+    /// notify=true 时通知界面关掉这个终端；断线重连时不通知，避免标签被清掉
+    Shutdown { notify: bool },
 }
 
 #[derive(Clone)]
@@ -52,9 +53,11 @@ pub struct Connection {
     pub id: String,
     pub host_id: String,
     pub title: String,
-    pub handle: Arc<SshClientHandle>,
+    pub handle: Mutex<Arc<SshClientHandle>>,
     shells: Mutex<HashMap<String, Arc<Shell>>>,
     pub exec_lock: AsyncMutex<()>,
+    /// 避免对不稳的机器连续重连，触发 fail2ban
+    revive_after: Mutex<SystemTime>,
 }
 
 pub struct SessionManager {
@@ -108,7 +111,10 @@ impl SessionManager {
         };
 
         let config = Arc::new(Config {
-            inactivity_timeout: Some(Duration::from_secs(3600)),
+            // 不设空闲断开。跨网的机器几分钟没数据就会被中间设备掐掉，之后再 exec 就是 Channel send error。
+            inactivity_timeout: None,
+            keepalive_interval: Some(Duration::from_secs(15)),
+            keepalive_max: 4,
             ..Default::default()
         });
         let addr = (h.host.as_str(), h.port);
@@ -160,6 +166,7 @@ impl SessionManager {
         mut cmd_rx: UnboundedReceiver<ShellIoCmd>,
     ) {
         tokio::spawn(async move {
+            let mut notify_closed = false;
             loop {
                 tokio::select! {
                     msg = channel.wait() => {
@@ -176,9 +183,12 @@ impl SessionManager {
                                     }),
                                 );
                             }
-                            Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Close) | None => {
+                            // 远端 shell 自己退出才关标签。传输断开时 wait 得到 None，留给重连复用同一个终端。
+                            Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Close) => {
+                                notify_closed = true;
                                 break;
                             }
+                            None => break,
                             _ => {}
                         }
                     }
@@ -192,18 +202,24 @@ impl SessionManager {
                             Some(ShellIoCmd::Resize { cols, rows }) => {
                                 let _ = channel.window_change(cols, rows, 0, 0).await;
                             }
-                            Some(ShellIoCmd::Shutdown) | None => break,
+                            Some(ShellIoCmd::Shutdown { notify }) => {
+                                notify_closed = notify;
+                                break;
+                            }
+                            None => break,
                         }
                     }
                 }
             }
             let _ = channel.eof().await;
             let _ = channel.close().await;
-            emit(
-                &app,
-                "ssh:closed",
-                serde_json::json!({ "sessionId": shell_id }),
-            );
+            if notify_closed {
+                emit(
+                    &app,
+                    "ssh:closed",
+                    serde_json::json!({ "sessionId": shell_id }),
+                );
+            }
         });
     }
 
@@ -212,8 +228,8 @@ impl SessionManager {
         connection: &Arc<Connection>,
         shell: &Arc<Shell>,
     ) -> Result<(), String> {
-        let mut channel = connection
-            .handle
+        let handle = connection.handle.lock().clone();
+        let channel = handle
             .channel_open_session()
             .await
             .map_err(|e| format!("无法打开 shell: {}", e))?;
@@ -281,9 +297,10 @@ impl SessionManager {
             id: connection_id.clone(),
             host_id: host_id.to_string(),
             title: title.clone(),
-            handle,
+            handle: Mutex::new(handle),
             shells: Mutex::new(HashMap::new()),
             exec_lock: AsyncMutex::new(()),
+            revive_after: Mutex::new(UNIX_EPOCH),
         });
 
         let shell = Arc::new(Shell {
@@ -316,6 +333,56 @@ impl SessionManager {
             "shellId": shell_id,
             "title": title
         }))
+    }
+
+    pub fn transport_dead(err: &str) -> bool {
+        let l = err.to_ascii_lowercase();
+        l.contains("channel send error")
+            || l.contains("disconnect")
+            || l.contains("keepalive")
+            || l.contains("connection reset")
+            || l.contains("broken pipe")
+            || l.contains("not connected")
+            || l.contains("连接已断开")
+    }
+
+    /// 会话线程已经退出时，重新登录并恢复已有终端。两次重连至少间隔 20 秒。
+    pub async fn revive_connection(&self, conn: &Arc<Connection>) -> Result<(), String> {
+        let now = SystemTime::now();
+        {
+            let mut next = conn.revive_after.lock();
+            if *next > now {
+                let secs = next
+                    .duration_since(now)
+                    .map(|d| d.as_secs().max(1))
+                    .unwrap_or(20);
+                return Err(format!(
+                    "这台机器的 SSH 刚断开，{} 秒后再重连，避免频繁登录被服务器封禁",
+                    secs
+                ));
+            }
+            *next = now + Duration::from_secs(20);
+        }
+
+        let (handle, _) = Self::connect_client(&conn.host_id).await?;
+        let old = {
+            let mut slot = conn.handle.lock();
+            std::mem::replace(&mut *slot, handle)
+        };
+        tokio::spawn(async move {
+            let _ = old.disconnect(Disconnect::ByApplication, "", "").await;
+        });
+
+        let shells: Vec<Arc<Shell>> = conn.shells.lock().values().cloned().collect();
+        for shell in shells {
+            if let Some(tx) = shell.io_tx.lock().await.take() {
+                let _ = tx.send(ShellIoCmd::Shutdown { notify: false });
+            }
+            if let Err(err) = self.open_shell_on_connection(conn, &shell).await {
+                return Err(format!("已重连，但恢复终端失败: {}", err));
+            }
+        }
+        Ok(())
     }
 
     pub fn connection_for_exec(&self, id: &str) -> Result<Arc<Connection>, String> {
@@ -412,7 +479,7 @@ impl SessionManager {
                 let s = Arc::clone(&shell);
                 tokio::spawn(async move {
                     if let Some(tx) = s.io_tx.lock().await.take() {
-                        let _ = tx.send(ShellIoCmd::Shutdown);
+                        let _ = tx.send(ShellIoCmd::Shutdown { notify: true });
                     }
                 });
             }
@@ -429,7 +496,7 @@ impl SessionManager {
             for id in ids {
                 self.cleanup_shell(&id, true);
             }
-            let handle = Arc::clone(&conn.handle);
+            let handle = conn.handle.lock().clone();
             tokio::spawn(async move {
                 let _ = handle
                     .disconnect(Disconnect::ByApplication, "", "")

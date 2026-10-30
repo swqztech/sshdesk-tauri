@@ -48,78 +48,27 @@ df -B1 -P -x tmpfs -x devtmpfs -x squashfs -x overlay 2>/dev/null | awk 'NR>1{gs
 "###;
 
 const PM2_SCRIPT: &str = r###"
-node <<'NODE'
-const { execSync } = require('child_process')
-
-function findPm2() {
-  const tries = [
-    'command -v pm2 2>/dev/null',
-    'test -x /usr/local/bin/pm2 && echo /usr/local/bin/pm2',
-    'test -x /usr/bin/pm2 && echo /usr/bin/pm2'
-  ]
-  for (const cmd of tries) {
-    try {
-      const hit = execSync(cmd, { encoding: 'utf8', shell: '/bin/bash' }).trim().split(/\r?\n/)[0]
-      if (hit) return hit
-    } catch {}
-  }
-  return ''
-}
-
-const bin = findPm2()
-if (!bin) {
-  console.log('@PM2_ERR|not_installed')
-  process.exit(0)
-}
-
-let raw = ''
-try {
-  raw = execSync('"' + bin.replace(/"/g, '') + '" jlist', {
-    encoding: 'utf8',
-    maxBuffer: 20 * 1024 * 1024,
-    timeout: 12000
-  })
-} catch (e) {
-  console.log('@PM2_ERR|failed')
-  process.exit(0)
-}
-
-let list
-try {
-  list = JSON.parse(raw)
-} catch {
-  console.log('@PM2_ERR|parse')
-  process.exit(0)
-}
-
-if (!Array.isArray(list)) {
-  console.log('@PM2_ERR|parse')
-  process.exit(0)
-}
-
-const now = Date.now()
-for (const p of list) {
-  const env = p.pm2_env || {}
-  const mon = p.monit || {}
-  const status = String(env.status || 'unknown')
-  const pmUptime = Number(env.pm_uptime || 0)
-  let uptimeSec = 0
-  if (pmUptime > 0 && (status === 'online' || status === 'launching')) {
-    uptimeSec = Math.max(0, Math.floor((now - pmUptime) / 1000))
-  }
-  const row = {
-    id: Number(p.pm_id ?? env.pm_id ?? 0),
-    name: String(env.name || p.name || 'unknown'),
-    status,
-    uptimeSec,
-    cpu: Number(mon.cpu || 0),
-    mem: Number(mon.memory || 0),
-    pid: Number(p.pid || 0),
-    restarts: Number(env.restart_time || 0)
-  }
-  console.log('@PROC|' + Buffer.from(JSON.stringify(row)).toString('base64'))
-}
-NODE
+bin=""
+if command -v pm2 >/dev/null 2>&1; then bin=$(command -v pm2); fi
+[ -z "$bin" ] && [ -x /usr/local/bin/pm2 ] && bin=/usr/local/bin/pm2
+[ -z "$bin" ] && [ -x /usr/bin/pm2 ] && bin=/usr/bin/pm2
+if [ -z "$bin" ]; then
+  echo '@PM2_ERR|not_installed'
+  exit 0
+fi
+# 进程多或 pm2 卡死时不要一直占着 SSH 通道
+if command -v timeout >/dev/null 2>&1; then
+  raw=$(timeout 8 "$bin" jlist 2>/dev/null)
+  code=$?
+else
+  raw=$("$bin" jlist 2>/dev/null)
+  code=$?
+fi
+if [ "$code" -ne 0 ] || [ -z "$raw" ]; then
+  echo '@PM2_ERR|failed'
+  exit 0
+fi
+printf '%s\n' "$raw"
 "###;
 
 pub async fn fetch_host_stats(
@@ -229,9 +178,52 @@ pub async fn fetch_host_pm2(
     Ok(parse_pm2(&res.stdout, &res.stderr))
 }
 
+fn push_pm2_proc(processes: &mut Vec<serde_json::Value>, p: &serde_json::Value) {
+    let env = p.get("pm2_env").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let mon = p.get("monit").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let status = env
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let pm_uptime = env.get("pm_uptime").and_then(|v| v.as_u64()).unwrap_or(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let uptime_sec = if pm_uptime > 0 && (status == "online" || status == "launching") && now_ms > pm_uptime
+    {
+        (now_ms - pm_uptime) / 1000
+    } else {
+        0
+    };
+    processes.push(serde_json::json!({
+        "pmId": p.get("pm_id").and_then(|v| v.as_u64()).or_else(|| env.get("pm_id").and_then(|v| v.as_u64())).unwrap_or(0),
+        "name": env.get("name").and_then(|v| v.as_str()).or_else(|| p.get("name").and_then(|v| v.as_str())).unwrap_or("unknown"),
+        "status": status,
+        "uptimeSec": uptime_sec,
+        "cpuPercent": mon.get("cpu").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        "memoryBytes": mon.get("memory").and_then(|v| v.as_u64()).unwrap_or(0),
+        "pid": p.get("pid").and_then(|v| v.as_u64()).unwrap_or(0),
+        "restarts": env.get("restart_time").and_then(|v| v.as_u64()).unwrap_or(0),
+    }));
+}
+
 fn parse_pm2(stdout: &str, stderr: &str) -> serde_json::Value {
     let mut processes: Vec<serde_json::Value> = Vec::new();
     let mut notice: Option<String> = None;
+
+    if let Some(start) = stdout.find('[') {
+        if let Some(end) = stdout[start..].rfind(']') {
+            let raw = &stdout[start..=start + end];
+            if let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(raw) {
+                for p in &list {
+                    push_pm2_proc(&mut processes, p);
+                }
+            } else if processes.is_empty() {
+                notice = Some("pm2 数据解析失败".into());
+            }
+        }
+    }
 
     for line in stdout.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
         if let Some(code) = line.strip_prefix("@PM2_ERR|") {

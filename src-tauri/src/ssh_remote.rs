@@ -26,48 +26,84 @@ pub async fn exec_command(
 ) -> Result<ExecResult, String> {
     let conn = mgr.connection_for_exec(session_id)?;
     let _guard = conn.exec_lock.lock().await;
+    if conn.handle.lock().is_closed() {
+        mgr.revive_connection(&conn).await?;
+    }
+    match exec_on_connection(&conn, command, timeout_ms).await {
+        Ok(result) => Ok(result),
+        Err(err) if SessionManager::transport_dead(&err) => {
+            mgr.revive_connection(&conn).await?;
+            exec_on_connection(&conn, command, timeout_ms)
+                .await
+                .map_err(|e| {
+                    if SessionManager::transport_dead(&e) {
+                        "SSH 重连后仍然打不开命令通道。这台机器的网络或 sshd 不稳定，请稍后再进首页".into()
+                    } else {
+                        e
+                    }
+                })
+        }
+        Err(err) => Err(err),
+    }
+}
+
+async fn exec_on_connection(
+    conn: &crate::sessions::Connection,
+    command: &str,
+    timeout_ms: u64,
+) -> Result<ExecResult, String> {
     let timeout = Duration::from_millis(timeout_ms.max(1000));
     let wrapped = format!("bash -lc {}", sh_quote(command));
+    let handle = conn.handle.lock().clone();
+    if handle.is_closed() {
+        return Err("Channel send error".into());
+    }
 
-    let mut channel = conn
-        .handle
+    let mut channel = handle
         .channel_open_session()
         .await
         .map_err(|e| format!("exec 通道失败: {}", e))?;
-    channel
-        .exec(true, wrapped)
-        .await
-        .map_err(|e| e.to_string())?;
+    if let Err(err) = channel.exec(true, wrapped).await {
+        let _ = channel.close().await;
+        return Err(err.to_string());
+    }
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let deadline = tokio::time::Instant::now() + timeout;
+    let mut result = Err(format!("远程命令超时（{}s）", timeout.as_secs()));
 
     loop {
         if tokio::time::Instant::now() > deadline {
-            return Err(format!("远程命令超时（{}s）", timeout.as_secs()));
+            break;
         }
         let msg = channel.wait().await;
         match msg {
             Some(ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
             Some(ChannelMsg::ExtendedData { data, ext: 1 }) => stderr.extend_from_slice(&data),
             Some(ChannelMsg::ExitStatus { exit_status }) => {
-                return Ok(ExecResult {
+                result = Ok(ExecResult {
                     code: exit_status,
                     stdout: String::from_utf8_lossy(&stdout).to_string(),
                     stderr: String::from_utf8_lossy(&stderr).to_string(),
                 });
+                break;
             }
             Some(ChannelMsg::Close) | None => {
-                return Ok(ExecResult {
+                result = Ok(ExecResult {
                     code: 0,
                     stdout: String::from_utf8_lossy(&stdout).to_string(),
                     stderr: String::from_utf8_lossy(&stderr).to_string(),
                 });
+                break;
             }
             _ => {}
         }
     }
+    // 超时或结束后必须关掉通道。否则不稳的机器上会话会堆满，后面全部变成 Channel send error。
+    let _ = channel.eof().await;
+    let _ = channel.close().await;
+    result
 }
 
 fn normalize_remote_path(input: &str) -> String {
@@ -103,8 +139,8 @@ fn join_remote(base: &str, name: &str) -> String {
 }
 
 async fn open_sftp(conn: &Connection) -> Result<SftpSession, String> {
-    let channel = conn
-        .handle
+    let handle = conn.handle.lock().clone();
+    let channel = handle
         .channel_open_session()
         .await
         .map_err(|e| e.to_string())?;

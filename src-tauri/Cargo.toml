@@ -37,3 +37,8 @@ zip = "9.0"
 regex = "1"
 chrono = "0.4"
 urlencoding = "2"
+
+[features]
+# 正式版必须打开，否则窗口会去连 devUrl（localhost）而不是内置页面
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
