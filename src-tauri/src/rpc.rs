@@ -79,6 +79,23 @@ pub async fn dispatch(
             Ok(serde_json::to_value(hosts::update_host(&id, input)?).map_err(|e| e.to_string())?)
         }
         "hosts:delete" => Ok(Value::Bool(hosts::delete_host(&str_arg(args, 0)?)?)),
+        "hosts:export" => {
+            let path = str_arg(args, 0)?;
+            Ok(serde_json::to_value(hosts::export_hosts(&path)?).map_err(|e| e.to_string())?)
+        }
+        "hosts:previewImport" => {
+            let path = str_arg(args, 0)?;
+            Ok(serde_json::to_value(hosts::preview_import(&path)?).map_err(|e| e.to_string())?)
+        }
+        "hosts:import" => {
+            let path = str_arg(args, 0)?;
+            let mode = str_arg(args, 1)?;
+            let replace = mode == "replace";
+            if mode != "replace" && mode != "merge" {
+                return Err("导入方式只能是合并或替换".into());
+            }
+            Ok(serde_json::to_value(hosts::import_hosts(&path, replace)?).map_err(|e| e.to_string())?)
+        }
 
         "ssh:list" => Ok(serde_json::to_value(mgr.list()).map_err(|e| e.to_string())?),
         "ssh:connect" => {

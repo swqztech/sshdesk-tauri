@@ -9,6 +9,7 @@ import type {
   FileDownloadProgress,
   HostInput,
   HostPm2Snapshot,
+  HostTransferReport,
   HostStats,
   HostView,
   LocalBackupItem,
@@ -34,6 +35,27 @@ export const api = {
   updateHost: (id: string, input: HostInput): Promise<HostView> =>
     rpc('hosts:update', id, input),
   deleteHost: (id: string): Promise<boolean> => rpc('hosts:delete', id),
+  exportHosts: async (): Promise<HostTransferReport | null> => {
+    const picked = await save({
+      title: '导出全部主机',
+      defaultPath: 'sshdesk-hosts.json',
+      filters: [{ name: '连枢主机', extensions: ['json'] }]
+    })
+    if (typeof picked !== 'string') return null
+    return rpc('hosts:export', picked)
+  },
+  previewImportHosts: async (): Promise<{ path: string; report: HostTransferReport } | null> => {
+    const picked = await open({
+      title: '导入主机',
+      multiple: false,
+      filters: [{ name: '连枢主机', extensions: ['json'] }]
+    })
+    if (typeof picked !== 'string') return null
+    const report = await rpc<HostTransferReport>('hosts:previewImport', picked)
+    return { path: picked, report }
+  },
+  importHosts: (path: string, mode: 'merge' | 'replace'): Promise<HostTransferReport> =>
+    rpc('hosts:import', path, mode),
   pickKey: async (): Promise<string | null> => {
     const picked = await open({ multiple: false, title: '选择 SSH 私钥' })
     return typeof picked === 'string' ? picked : null

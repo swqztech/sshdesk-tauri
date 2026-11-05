@@ -14,6 +14,15 @@ export type HostView = {
   updatedAt: number
 }
 
+export type HostTransferReport = {
+  path: string
+  count: number
+  added: number
+  updated: number
+  names: string[]
+  warnings: string[]
+}
+
 export type HostInput = {
   name: string
   host: string

@@ -51,6 +51,10 @@ input {
   overflow: hidden;
 }
 
+.app.sidebar-collapsed {
+  grid-template-columns: 48px 1fr;
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -60,6 +64,42 @@ input {
   background: rgba(18, 26, 34, 0.88);
   backdrop-filter: blur(8px);
   min-height: 0;
+}
+
+.brand-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.brand-row .ghost {
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+
+.sidebar.rail {
+  padding: 10px 6px;
+  align-items: center;
+  gap: 0;
+}
+
+.rail-toggle {
+  writing-mode: vertical-rl;
+  border: 1px solid rgba(242, 193, 78, 0.4);
+  background: rgba(242, 193, 78, 0.12);
+  color: var(--brass);
+  border-radius: 10px;
+  padding: 16px 8px;
+  cursor: pointer;
+  letter-spacing: 0.22em;
+  font-weight: 700;
+}
+
+.side-io {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
 }
 
 .brand-name {
@@ -172,18 +212,44 @@ input {
   position: relative;
 }
 
-.banner.error {
+.banner.error,
+.banner.ok {
   position: absolute;
   top: 10px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 5;
-  background: rgba(255, 107, 74, 0.16);
-  border: 1px solid rgba(255, 107, 74, 0.45);
-  color: #ffc2b4;
   padding: 8px 14px;
   border-radius: 10px;
   max-width: min(720px, 90%);
+}
+
+.banner.error {
+  background: rgba(255, 107, 74, 0.16);
+  border: 1px solid rgba(255, 107, 74, 0.45);
+  color: #ffc2b4;
+}
+
+.banner.ok {
+  background: rgba(61, 220, 151, 0.16);
+  border: 1px solid rgba(61, 220, 151, 0.45);
+  color: #c8ffe8;
+}
+
+.banner.ok.below {
+  top: 52px;
+}
+
+.import-foot {
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.modal-body .section-sub {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  word-break: break-all;
 }
 
 .tabs {
@@ -1493,5 +1559,22 @@ button:disabled {
 
   .sidebar {
     max-height: 42vh;
+  }
+
+  .app.sidebar-collapsed {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .sidebar.rail {
+    max-height: none;
+    flex-direction: row;
+    justify-content: flex-start;
+  }
+
+  .rail-toggle {
+    writing-mode: horizontal-tb;
+    letter-spacing: 0.08em;
+    padding: 8px 14px;
   }
 }

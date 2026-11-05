@@ -152,6 +152,18 @@ export default function App() {
 
   const [error, setError] = useState('')
 
+  const [notice, setNotice] = useState('')
+
+  const [sidebarOpen, setSidebarOpen] = useState(
+    () => localStorage.getItem('sshdesk.sidebarOpen') !== '0'
+  )
+
+  const [importPlan, setImportPlan] = useState<{
+    path: string
+    count: number
+    names: string[]
+  } | null>(null)
+
   const [editor, setEditor] = useState<{ mode: 'create' | 'edit'; id?: string } | null>(null)
 
   const [form, setForm] = useState<FormState>(emptyForm)
@@ -179,6 +191,64 @@ export default function App() {
     void refresh()
 
   }, [refresh])
+
+  useEffect(() => {
+    localStorage.setItem('sshdesk.sidebarOpen', sidebarOpen ? '1' : '0')
+  }, [sidebarOpen])
+
+  const exportAllHosts = async () => {
+    if (!hosts.length) {
+      setError('还没有主机可以导出')
+      return
+    }
+    if (!window.confirm('导出文件里包含登录密码和私钥内容，换电脑时用它导入。请不要把文件发给别人。')) {
+      return
+    }
+    setError('')
+    setNotice('')
+    try {
+      const report = await window.api.exportHosts()
+      if (!report) return
+      const extra = report.warnings.length ? ` ${report.warnings.join('；')}` : ''
+      setNotice(`已导出 ${report.count} 台主机。${extra}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '导出失败')
+    }
+  }
+
+  const chooseImportFile = async () => {
+    setError('')
+    setNotice('')
+    try {
+      const picked = await window.api.previewImportHosts()
+      if (!picked) return
+      setImportPlan({
+        path: picked.path,
+        count: picked.report.count,
+        names: picked.report.names
+      })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '读不了这个导出文件')
+    }
+  }
+
+  const runImport = async (mode: 'merge' | 'replace') => {
+    if (!importPlan) return
+    setError('')
+    try {
+      const report = await window.api.importHosts(importPlan.path, mode)
+      setImportPlan(null)
+      await refresh()
+      const extra = report.warnings.length ? ` ${report.warnings.join('；')}` : ''
+      setNotice(
+        mode === 'replace'
+          ? `已换成文件里的 ${report.count} 台主机。${extra}`
+          : `导入完成：新增 ${report.added} 台，更新 ${report.updated} 台。${extra}`
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '导入失败')
+    }
+  }
 
 
 
@@ -752,15 +822,28 @@ export default function App() {
 
   return (
 
-    <div className="app">
+    <div className={`app${sidebarOpen ? '' : ' sidebar-collapsed'}`}>
 
-      <aside className="sidebar">
+      <aside className={sidebarOpen ? 'sidebar' : 'sidebar rail'}>
 
+        {sidebarOpen ? (
+        <>
         <header className="brand">
 
-          <p className="brand-name">连枢</p>
-
-          <p className="brand-sub">SSH 主机台</p>
+          <div className="brand-row">
+            <div>
+              <p className="brand-name">连枢</p>
+              <p className="brand-sub">SSH 主机台</p>
+            </div>
+            <button
+              type="button"
+              className="ghost"
+              title="隐藏主机列表"
+              onClick={() => setSidebarOpen(false)}
+            >
+              隐藏
+            </button>
+          </div>
 
         </header>
 
@@ -773,6 +856,15 @@ export default function App() {
             添加主机
 
           </button>
+
+          <div className="side-io">
+            <button type="button" className="ghost" onClick={() => void exportAllHosts()}>
+              导出全部
+            </button>
+            <button type="button" className="ghost" onClick={() => void chooseImportFile()}>
+              导入
+            </button>
+          </div>
 
           <input
 
@@ -860,6 +952,17 @@ export default function App() {
           {filtered.length === 0 && <li className="empty">还没有主机，先添加一台 Linux 服务器。</li>}
 
         </ul>
+        </>
+        ) : (
+          <button
+            type="button"
+            className="rail-toggle"
+            title="显示主机列表"
+            onClick={() => setSidebarOpen(true)}
+          >
+            主机
+          </button>
+        )}
 
       </aside>
 
@@ -868,6 +971,7 @@ export default function App() {
       <main className="workspace">
 
         {error && <div className="banner error">{error}</div>}
+        {notice && <div className={`banner ok${error ? ' below' : ''}`}>{notice}</div>}
 
 
 
@@ -1280,6 +1384,36 @@ export default function App() {
       </main>
 
 
+
+      {importPlan && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h2>导入 {importPlan.count} 台主机</h2>
+              <button type="button" className="ghost" onClick={() => setImportPlan(null)}>
+                取消
+              </button>
+            </div>
+            <div className="modal-body">
+              <p className="section-sub">
+                {importPlan.names.slice(0, 8).join('、')}
+                {importPlan.names.length > 8 ? ` 等 ${importPlan.names.length} 台` : ''}
+              </p>
+              <p className="section-sub">
+                合并会按主机地址、端口、用户名更新已有的，其余新增。替换会清掉现在的列表，只留下文件里的主机。密码和私钥会一起写入。
+              </p>
+            </div>
+            <div className="modal-foot import-foot">
+              <button type="button" className="ghost" onClick={() => void runImport('merge')}>
+                合并导入
+              </button>
+              <button type="button" className="primary" onClick={() => void runImport('replace')}>
+                替换全部
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {editor && (
 
